@@ -1,7 +1,36 @@
 export default {
     async fetch(request, env, ctx) {
-        return await handleRequest(request, env, ctx)
+        const startedAt = Date.now()
+        const method = request.method
+        const route = getSafeRoute(request, env.ROOT_PATH || '/')
+        const response = await handleRequest(request, env, ctx)
+
+        console.log(JSON.stringify({
+            event: 'request',
+            method,
+            route,
+            status: response.status,
+            duration_ms: Date.now() - startedAt,
+        }))
+
+        return response
     }
+}
+
+function getSafeRoute(request, rootPath) {
+    const pathname = new URL(request.url).pathname
+    const escapedRootPath = rootPath.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&')
+    const realPathname = pathname.replace(new RegExp('^' + escapedRootPath), '/')
+
+    if (['/register', '/ping', '/healthz', '/info'].includes(realPathname)) {
+        return realPathname
+    }
+
+    if (realPathname === '/mcp' || realPathname.startsWith('/mcp/')) {
+        return '/mcp'
+    }
+
+    return '/push'
 }
 
 async function handleRequest(request, env, ctx) {
