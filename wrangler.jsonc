@@ -6,13 +6,23 @@
         "nodejs_compat"
     ],
     "observability": {
-        "enabled": true
+        "enabled": true,
+        "issues": {
+            "enabled": true
+        },
+        "logs": {
+            "enabled": true,
+            "invocation_logs": false
+        },
+        "traces": {
+            "enabled": false
+        }
     },
     "d1_databases": [
         {
             "binding": "database",
-            "database_name": "database-bark",
-            "database_id": "<unique-ID-for-your-database>"
+            "database_name": "bark-worker-db",
+            "database_id": "8d5d9f97-93d8-4d7a-a059-6bbee62a2217"
         }
     ],
     "keep_vars": true,
