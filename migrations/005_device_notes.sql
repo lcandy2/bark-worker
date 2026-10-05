@@ -1,0 +1,1 @@
+ALTER TABLE `devices` ADD COLUMN `note` TEXT NOT NULL DEFAULT '';

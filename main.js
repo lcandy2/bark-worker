@@ -58,7 +58,7 @@ async function handleRequest(request, env, ctx) {
             return handleAdminPage(request)
         }
 
-        if (realPathname === '/admin/api/status' || realPathname === '/admin/api/registration') {
+        if (realPathname === '/admin/api/status' || realPathname === '/admin/api/registration' || realPathname === '/admin/api/device-note') {
             return handleAdminApi(request, db, realPathname)
         }
 
@@ -335,6 +335,12 @@ const ADMIN_HTML = `<!doctype html>
     th, td { padding: 11px 8px; text-align: left; border-bottom: 1px solid #edf0f3; }
     th { font-size: 12px; color: #697586; font-weight: 600; }
     td:first-child, th:first-child { width: 90px; }
+    .table-wrap { overflow-x: auto; }
+    .device-key { font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+    .note-editor { display: flex; gap: 8px; min-width: 220px; }
+    .note-editor input { min-width: 0; width: 100%; border: 1px solid #d9e0e7; border-radius: 7px; padding: 8px; font: inherit; }
+    .note-editor button { padding: 8px 10px; }
+    .note-status { color: #697586; font-size: 12px; }
     #message { min-height: 20px; color: #697586; font-size: 13px; }
     @media (max-width: 520px) { .control { align-items: flex-start; flex-direction: column; } section { padding: 16px; } }
   </style>
@@ -352,10 +358,12 @@ const ADMIN_HTML = `<!doctype html>
     <section>
       <h2 style="font-size:16px;margin:0 0 12px">Registered devices</h2>
       <div id="message" role="status" aria-live="polite"></div>
-      <table>
-        <thead><tr><th>ID</th><th>Registered at</th></tr></thead>
-        <tbody id="devices"></tbody>
-      </table>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>ID</th><th>Device key</th><th>Registered at</th><th>Note</th></tr></thead>
+          <tbody id="devices"></tbody>
+        </table>
+      </div>
     </section>
   </main>
   <script>
@@ -380,10 +388,56 @@ const ADMIN_HTML = `<!doctype html>
       for (const device of data.devices) {
         const row = document.createElement('tr');
         const id = document.createElement('td');
+        const key = document.createElement('td');
         const registered = document.createElement('td');
+        const note = document.createElement('td');
+        const noteEditor = document.createElement('div');
+        const noteInput = document.createElement('input');
+        const saveNote = document.createElement('button');
+        const noteStatus = document.createElement('span');
+
         id.textContent = String(device.id);
+        key.textContent = device.key;
+        key.className = 'device-key';
         registered.textContent = device.registeredAt ? formatTime(device.registeredAt) : 'Not recorded';
-        row.append(id, registered);
+        noteEditor.className = 'note-editor';
+        noteInput.type = 'text';
+        noteInput.maxLength = 500;
+        noteInput.value = device.note || '';
+        noteInput.placeholder = 'Add a note';
+        noteInput.setAttribute('aria-label', 'Note for device ' + device.id);
+        saveNote.type = 'button';
+        saveNote.textContent = 'Save';
+        noteStatus.className = 'note-status';
+        noteStatus.setAttribute('role', 'status');
+        saveNote.addEventListener('click', async () => {
+          saveNote.disabled = true;
+          noteStatus.textContent = '';
+          try {
+            const response = await fetch('/admin/api/device-note', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ id: device.id, note: noteInput.value }),
+            });
+            const result = await response.json();
+            if (!response.ok) throw new Error(result.error || 'Could not save note');
+            noteInput.value = result.note;
+            noteStatus.textContent = 'Saved';
+          } catch (error) {
+            noteStatus.textContent = 'Save failed';
+          } finally {
+            saveNote.disabled = false;
+          }
+        });
+        noteInput.addEventListener('keydown', (event) => {
+          if (event.key === 'Enter') {
+            event.preventDefault();
+            saveNote.click();
+          }
+        });
+        noteEditor.append(noteInput, saveNote);
+        note.append(noteEditor, noteStatus);
+        row.append(id, key, registered, note);
         devices.append(row);
       }
       message.textContent = data.devices.length ? '' : 'No devices registered.';
@@ -462,7 +516,9 @@ async function handleAdminApi(request, db, path) {
             openUntil: state.openUntil,
             devices: devices.map((device) => ({
                 id: device.id,
+                key: device.key,
                 registeredAt: Number(device.registered_at) || null,
+                note: device.note,
             })),
         })
     }
@@ -501,9 +557,41 @@ async function handleAdminApi(request, db, path) {
             openUntil: state.openUntil,
             devices: devices.map((device) => ({
                 id: device.id,
+                key: device.key,
                 registeredAt: Number(device.registered_at) || null,
+                note: device.note,
             })),
         })
+    }
+
+    if (path === '/admin/api/device-note' && request.method === 'POST') {
+        const origin = request.headers.get('origin')
+        if (origin !== 'https://bark.cedrat.im') {
+            return adminJson({ error: 'Forbidden' }, 403)
+        }
+
+        let body
+        try {
+            body = await request.json()
+        } catch {
+            return adminJson({ error: 'Invalid JSON' }, 400)
+        }
+
+        const id = Number(body.id)
+        const note = typeof body.note === 'string' ? body.note.trim() : null
+        if (!Number.isSafeInteger(id) || id < 1 || note === null || note.length > 500) {
+            return adminJson({ error: 'Invalid device id or note (maximum 500 characters)' }, 400)
+        }
+
+        const result = await db.updateDeviceNote(id, note)
+        if (!result.success) {
+            return adminJson({ error: 'Could not save note' }, 500)
+        }
+        if (result.meta?.changes === 0 && !(await db.hasRegisteredDevice(id))) {
+            return adminJson({ error: 'Device not found' }, 404)
+        }
+
+        return adminJson({ id, note })
     }
 
     return new Response('Method Not Allowed', {
@@ -1178,7 +1266,7 @@ class Database {
     constructor(env) {
         const db = env.database
 
-        db.exec('CREATE TABLE IF NOT EXISTS `devices` (`id` INTEGER PRIMARY KEY, `key` VARCHAR(255) NOT NULL, `token` VARCHAR(255) NOT NULL, `registered_at` INTEGER NOT NULL DEFAULT 0, UNIQUE (`key`))')
+        db.exec('CREATE TABLE IF NOT EXISTS `devices` (`id` INTEGER PRIMARY KEY, `key` VARCHAR(255) NOT NULL, `token` VARCHAR(255) NOT NULL, `registered_at` INTEGER NOT NULL DEFAULT 0, `note` TEXT NOT NULL DEFAULT \'\', UNIQUE (`key`))')
         db.exec('CREATE TABLE IF NOT EXISTS `authorization` (`id` INTEGER PRIMARY KEY, `token` VARCHAR(255) NOT NULL, `time` VARCHAR(255) NOT NULL)')
         db.exec('CREATE TABLE IF NOT EXISTS `sessions` (`id` VARCHAR(64) PRIMARY KEY, `device_key` VARCHAR(255), `initialized` INTEGER DEFAULT 0, `created_at` INTEGER NOT NULL, `last_seen` INTEGER NOT NULL)')
         db.exec('CREATE TABLE IF NOT EXISTS `registration_control` (`id` INTEGER PRIMARY KEY CHECK (`id` = 1), `open_until` INTEGER NOT NULL DEFAULT 0)')
@@ -1213,9 +1301,19 @@ class Database {
         }
 
         this.registeredDevices = async () => {
-            const query = 'SELECT `id`, `registered_at` FROM `devices` WHERE `token` != \'\' ORDER BY `registered_at` DESC, `id` DESC'
+            const query = 'SELECT `id`, `key`, `registered_at`, `note` FROM `devices` WHERE `token` != \'\' ORDER BY `registered_at` DESC, `id` DESC'
             const result = await db.prepare(query).run()
             return result.results || []
+        }
+
+        this.updateDeviceNote = async (id, note) => {
+            const query = 'UPDATE `devices` SET `note` = ? WHERE `id` = ? AND `token` != \'\''
+            return await db.prepare(query).bind(note, id).run()
+        }
+
+        this.hasRegisteredDevice = async (id) => {
+            const result = await db.prepare('SELECT `id` FROM `devices` WHERE `id` = ? AND `token` != \'\'').bind(id).run()
+            return result.results.length > 0
         }
 
         this.deviceTokenByKey = async (key) => {
