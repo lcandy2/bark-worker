@@ -21,11 +21,11 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Merge upstream master
+      - name: Merge upstream master into main
         run: |
           git remote add upstream https://github.com/cwxiaos/bark-worker.git
           git fetch upstream master
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git merge --no-edit upstream/master
-          git push origin HEAD:master
+          git push origin HEAD:main

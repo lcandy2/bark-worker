@@ -26,6 +26,10 @@ function getSafeRoute(request, rootPath) {
         return realPathname
     }
 
+    if (realPathname === '/admin' || realPathname.startsWith('/admin/')) {
+        return '/admin'
+    }
+
     if (realPathname === '/mcp' || realPathname.startsWith('/mcp/')) {
         return '/mcp'
     }
@@ -34,7 +38,6 @@ function getSafeRoute(request, rootPath) {
 }
 
 async function handleRequest(request, env, ctx) {
-    const allowNewDevice = env.ALLOW_NEW_DEVICE !== undefined ? (env.ALLOW_NEW_DEVICE === 'false' ? false : Boolean(env.ALLOW_NEW_DEVICE)) : true
     const allowQueryNums = env.ALLOW_QUERY_NUMS !== undefined ? (env.ALLOW_QUERY_NUMS === 'false' ? false : Boolean(env.ALLOW_QUERY_NUMS)) : true
     const rootPath = env.ROOT_PATH || '/'
     const basicAuth = env.BASIC_AUTH
@@ -43,8 +46,24 @@ async function handleRequest(request, env, ctx) {
     ctx.waitUntil(db.cleanupExpiredSessions())
 
     const { searchParams, pathname } = new URL(request.url)
-    const handler = new Handler(db, { allowNewDevice, allowQueryNums })
+    const handler = new Handler(db, { allowQueryNums })
     const realPathname = pathname.replace((new RegExp('^' + rootPath.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&'))), '/')
+
+    if (realPathname === '/admin' || realPathname.startsWith('/admin/')) {
+        if (new URL(request.url).hostname !== 'bark.cedrat.im') {
+            return new Response('Not Found', { status: 404 })
+        }
+
+        if (realPathname === '/admin' || realPathname === '/admin/') {
+            return handleAdminPage(request)
+        }
+
+        if (realPathname === '/admin/api/status' || realPathname === '/admin/api/registration') {
+            return handleAdminApi(request, db, realPathname)
+        }
+
+        return new Response('Not Found', { status: 404 })
+    }
 
     switch (realPathname) {
         case '/register': {
@@ -293,13 +312,212 @@ async function handleRequest(request, env, ctx) {
     }
 }
 
+const ADMIN_HTML = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Bark Admin</title>
+  <style>
+    :root { color-scheme: light; font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #18212b; background: #f5f7fa; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 32px 18px; }
+    main { max-width: 760px; margin: 0 auto; }
+    h1 { margin: 0 0 22px; font-size: 24px; letter-spacing: -.03em; }
+    section { background: #fff; border: 1px solid #e2e7ed; border-radius: 12px; padding: 20px; margin-bottom: 16px; }
+    .control { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+    .state { font-weight: 600; }
+    .muted { color: #697586; font-size: 13px; margin: 5px 0 0; }
+    button { border: 0; border-radius: 8px; background: #1f2937; color: white; padding: 10px 14px; font: inherit; cursor: pointer; white-space: nowrap; }
+    button:disabled { opacity: .55; cursor: wait; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 11px 8px; text-align: left; border-bottom: 1px solid #edf0f3; }
+    th { font-size: 12px; color: #697586; font-weight: 600; }
+    td:first-child, th:first-child { width: 90px; }
+    #message { min-height: 20px; color: #697586; font-size: 13px; }
+    @media (max-width: 520px) { .control { align-items: flex-start; flex-direction: column; } section { padding: 16px; } }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Bark Admin</h1>
+    <section class="control">
+      <div>
+        <div class="state" id="registration-state">Loading…</div>
+        <p class="muted" id="registration-until"></p>
+      </div>
+      <button id="registration-toggle" type="button" disabled>Loading…</button>
+    </section>
+    <section>
+      <h2 style="font-size:16px;margin:0 0 12px">Registered devices</h2>
+      <div id="message" role="status" aria-live="polite"></div>
+      <table>
+        <thead><tr><th>ID</th><th>Registered at</th></tr></thead>
+        <tbody id="devices"></tbody>
+      </table>
+    </section>
+  </main>
+  <script>
+    const stateLabel = document.querySelector('#registration-state');
+    const untilLabel = document.querySelector('#registration-until');
+    const toggle = document.querySelector('#registration-toggle');
+    const devices = document.querySelector('#devices');
+    const message = document.querySelector('#message');
+    let status = null;
+
+    function formatTime(seconds) {
+      return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(seconds * 1000));
+    }
+
+    function render(data) {
+      status = data;
+      stateLabel.textContent = data.registrationOpen ? 'Registration is open' : 'Registration is closed';
+      untilLabel.textContent = data.openUntil ? 'Closes automatically ' + formatTime(data.openUntil) : '';
+      toggle.textContent = data.registrationOpen ? 'Close registration' : 'Open for 24 hours';
+      toggle.disabled = false;
+      devices.replaceChildren();
+      for (const device of data.devices) {
+        const row = document.createElement('tr');
+        const id = document.createElement('td');
+        const registered = document.createElement('td');
+        id.textContent = String(device.id);
+        registered.textContent = device.registeredAt ? formatTime(device.registeredAt) : 'Not recorded';
+        row.append(id, registered);
+        devices.append(row);
+      }
+      message.textContent = data.devices.length ? '' : 'No devices registered.';
+    }
+
+    async function load() {
+      try {
+        const response = await fetch('/admin/api/status', { cache: 'no-store' });
+        if (!response.ok) throw new Error('Could not load admin status');
+        render(await response.json());
+      } catch (error) {
+        message.textContent = 'Could not load admin data.';
+        stateLabel.textContent = 'Unavailable';
+        toggle.disabled = true;
+      }
+    }
+
+    toggle.addEventListener('click', async () => {
+      if (!status) return;
+      toggle.disabled = true;
+      message.textContent = '';
+      try {
+        const response = await fetch('/admin/api/registration', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ enabled: !status.registrationOpen }),
+        });
+        if (!response.ok) throw new Error('Could not update registration');
+        render(await response.json());
+      } catch (error) {
+        message.textContent = 'Could not update registration.';
+        toggle.disabled = false;
+      }
+    });
+
+    load();
+    setInterval(load, 60000);
+  </script>
+</body>
+</html>`
+
+function adminJson(data, status = 200) {
+    return new Response(JSON.stringify(data), {
+        status,
+        headers: {
+            'content-type': 'application/json; charset=utf-8',
+            'cache-control': 'no-store',
+        },
+    })
+}
+
+async function handleAdminPage(request) {
+    if (request.method !== 'GET') {
+        return new Response('Method Not Allowed', { status: 405, headers: { Allow: 'GET' } })
+    }
+
+    return new Response(ADMIN_HTML, {
+        headers: {
+            'content-type': 'text/html; charset=utf-8',
+            'cache-control': 'no-store',
+            'x-content-type-options': 'nosniff',
+            'referrer-policy': 'no-referrer',
+            'x-frame-options': 'DENY',
+            'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'",
+        },
+    })
+}
+
+async function handleAdminApi(request, db, path) {
+    if (path === '/admin/api/status' && request.method === 'GET') {
+        const state = await db.registrationState()
+        const devices = await db.registeredDevices()
+
+        return adminJson({
+            registrationOpen: state.open,
+            openUntil: state.openUntil,
+            devices: devices.map((device) => ({
+                id: device.id,
+                registeredAt: Number(device.registered_at) || null,
+            })),
+        })
+    }
+
+    if (path === '/admin/api/registration' && request.method === 'POST') {
+        const origin = request.headers.get('origin')
+        if (origin !== 'https://bark.cedrat.im') {
+            return adminJson({ error: 'Forbidden' }, 403)
+        }
+
+        let body
+        try {
+            body = await request.json()
+        } catch {
+            return adminJson({ error: 'Invalid JSON' }, 400)
+        }
+
+        if (typeof body.enabled !== 'boolean') {
+            return adminJson({ error: 'enabled must be a boolean' }, 400)
+        }
+
+        const now = util.getTimestamp()
+        const current = await db.registrationState()
+        let openUntil = 0
+
+        if (body.enabled) {
+            openUntil = current.open ? current.openUntil : now + 24 * 60 * 60
+        }
+
+        await db.setRegistrationOpenUntil(openUntil)
+        const state = await db.registrationState()
+        const devices = await db.registeredDevices()
+
+        return adminJson({
+            registrationOpen: state.open,
+            openUntil: state.openUntil,
+            devices: devices.map((device) => ({
+                id: device.id,
+                registeredAt: Number(device.registered_at) || null,
+            })),
+        })
+    }
+
+    return new Response('Method Not Allowed', {
+        status: 405,
+        headers: { Allow: path === '/admin/api/status' ? 'GET' : 'POST' },
+    })
+}
+
 class Handler {
     constructor(db, options) {
         this.version = 'v2.3.4'
         this.build = '2026-09-12 17:45:41'
         this.arch = 'js'
         this.commit = '3db0918856d5aca4d141300c84d5c7a9f851ba44'
-        this.allowNewDevice = options.allowNewDevice
         this.allowQueryNums = options.allowQueryNums
 
         this.register = async (parameters) => {
@@ -332,20 +550,22 @@ class Handler {
                 })
             }
 
-            if (!(key && await db.deviceTokenByKey(key) != undefined)) {
-                if (this.allowNewDevice) {
-                    key = await util.newShortUUID()
-                } else {
+            const existingDevice = key && await db.deviceTokenByKey(key) !== undefined
+            if (!existingDevice) {
+                const registration = await db.registrationState()
+                if (!registration.open) {
                     return new Response(JSON.stringify({
-                        'code': 500,
+                        'code': 403,
                         'message': 'device registration failed: register disabled',
                     }), {
-                        status: 500,
+                        status: 403,
                         headers: {
                             'content-type': 'application/json',
                         }
                     })
                 }
+
+                key = await util.newShortUUID()
             }
 
             await db.saveDeviceTokenByKey(key, deviceToken)
@@ -958,15 +1178,44 @@ class Database {
     constructor(env) {
         const db = env.database
 
-        db.exec('CREATE TABLE IF NOT EXISTS `devices` (`id` INTEGER PRIMARY KEY, `key` VARCHAR(255) NOT NULL, `token` VARCHAR(255) NOT NULL, UNIQUE (`key`))')
+        db.exec('CREATE TABLE IF NOT EXISTS `devices` (`id` INTEGER PRIMARY KEY, `key` VARCHAR(255) NOT NULL, `token` VARCHAR(255) NOT NULL, `registered_at` INTEGER NOT NULL DEFAULT 0, UNIQUE (`key`))')
         db.exec('CREATE TABLE IF NOT EXISTS `authorization` (`id` INTEGER PRIMARY KEY, `token` VARCHAR(255) NOT NULL, `time` VARCHAR(255) NOT NULL)')
         db.exec('CREATE TABLE IF NOT EXISTS `sessions` (`id` VARCHAR(64) PRIMARY KEY, `device_key` VARCHAR(255), `initialized` INTEGER DEFAULT 0, `created_at` INTEGER NOT NULL, `last_seen` INTEGER NOT NULL)')
+        db.exec('CREATE TABLE IF NOT EXISTS `registration_control` (`id` INTEGER PRIMARY KEY CHECK (`id` = 1), `open_until` INTEGER NOT NULL DEFAULT 0)')
+        db.exec('INSERT OR IGNORE INTO `registration_control` (`id`, `open_until`) VALUES (1, 0)')
 
         this.countAll = async () => {
             const query = 'SELECT COUNT(*) as rowCount FROM `devices`'
             const result = await db.prepare(query).run()
 
             return (result.results[0] || { 'rowCount': -1 }).rowCount
+        }
+
+        this.registrationState = async () => {
+            const result = await db.prepare('SELECT `open_until` FROM `registration_control` WHERE `id` = 1').run()
+            let openUntil = Number((result.results[0] || {}).open_until || 0)
+            const now = util.getTimestamp()
+
+            if (openUntil > 0 && openUntil <= now) {
+                await this.setRegistrationOpenUntil(0)
+                openUntil = 0
+            }
+
+            return {
+                open: openUntil > now,
+                openUntil: openUntil > now ? openUntil : null,
+            }
+        }
+
+        this.setRegistrationOpenUntil = async (openUntil) => {
+            const query = 'INSERT INTO `registration_control` (`id`, `open_until`) VALUES (1, ?) ON CONFLICT(`id`) DO UPDATE SET `open_until` = EXCLUDED.`open_until`'
+            return await db.prepare(query).bind(openUntil).run()
+        }
+
+        this.registeredDevices = async () => {
+            const query = 'SELECT `id`, `registered_at` FROM `devices` WHERE `token` != \'\' ORDER BY `registered_at` DESC, `id` DESC'
+            const result = await db.prepare(query).run()
+            return result.results || []
         }
 
         this.deviceTokenByKey = async (key) => {
@@ -990,8 +1239,8 @@ class Database {
 
         this.saveDeviceTokenByKey = async (key, token) => {
             const device_token = (token || '').replace(/[^a-z0-9]/g, '') || ''
-            const query = 'INSERT INTO `devices` (`key`, `token`) VALUES (?, ?) ON CONFLICT(`key`) DO UPDATE SET `token` = EXCLUDED.`token`'
-            const result = await db.prepare(query).bind(key, device_token).run()
+            const query = 'INSERT INTO `devices` (`key`, `token`, `registered_at`) VALUES (?, ?, ?) ON CONFLICT(`key`) DO UPDATE SET `token` = EXCLUDED.`token`, `registered_at` = CASE WHEN `devices`.`registered_at` = 0 THEN EXCLUDED.`registered_at` ELSE `devices`.`registered_at` END'
+            const result = await db.prepare(query).bind(key, device_token, util.getTimestamp()).run()
 
             if (device_token === '') {
                 delete cachedDeviceToken[key]
