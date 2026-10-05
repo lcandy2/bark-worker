@@ -3,6 +3,24 @@ export default {
         const startedAt = Date.now()
         const method = request.method
         const route = getSafeRoute(request, env.ROOT_PATH || '/')
+
+        if (method === 'GET') {
+            const response = new Response('Method Not Allowed', {
+                status: 405,
+                headers: { Allow: 'POST' },
+            })
+
+            console.log(JSON.stringify({
+                event: 'request_blocked',
+                method,
+                route,
+                status: response.status,
+                duration_ms: Date.now() - startedAt,
+            }))
+
+            return response
+        }
+
         const response = await handleRequest(request, env, ctx)
 
         console.log(JSON.stringify({
