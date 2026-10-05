@@ -81,7 +81,7 @@ async function push(payload) {
     }
 }
 
-test('GET requests are rejected before reaching Bark routes', async () => {
+test('GET /ping remains compatible with the client health check', async () => {
     const { context, settle } = createWorkerContext()
     const response = await worker.fetch(new Request('https://worker.example/ping'), {
         database: new FakeD1Database(),
@@ -90,9 +90,13 @@ test('GET requests are rejected before reaching Bark routes', async () => {
         ROOT_PATH: '/',
     }, context)
 
-    assert.equal(response.status, 405)
-    assert.equal(response.headers.get('allow'), 'POST')
-    assert.equal(await response.text(), 'Method Not Allowed')
+    await settle()
+
+    assert.equal(response.status, 200)
+    const body = await response.json()
+    assert.equal(body.code, 200)
+    assert.equal(body.message, 'pong')
+    assert.equal(typeof body.timestamp, 'number')
 })
 
 test('POST /push preserves the current client contract in the APNs payload', async () => {
